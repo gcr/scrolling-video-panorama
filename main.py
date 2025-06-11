@@ -35,7 +35,6 @@ def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
 
     video_reader = torchvision.io.VideoReader(video_path)
     px_offsets = []
-    frames = []
     CROP_TOP = 512
     N_FRAMES = 550
     prev_frame = None
@@ -55,7 +54,6 @@ def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
             px_offsets.append(-offset)  # Flip sign for downward scrolling
             prev_frame = frame
 
-        frames.append(frame.squeeze())
 
 
     # Convert relative offsets to absolute positions
@@ -65,18 +63,23 @@ def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
     # Create panorama canvas
     min_pos = absolute_positions.min().int()
     max_pos = absolute_positions.max().int()
-    frame_height = frames[0].shape[0]
+    frame_height = frame.shape[1]
     total_height = max_pos - min_pos + frame_height
-    total_width = frames[0].shape[1]
+    total_width = frame.shape[2]
 
-    panorama = torch.zeros((total_height, total_width), dtype=torch.float32)
+    panorama = torch.zeros((3, total_height, total_width), dtype=torch.float32)
     count = torch.zeros((total_height, total_width), dtype=torch.float32)
 
     # Stitch frames into panorama
-    for i, (frame, pos) in enumerate(zip(frames, absolute_positions)):
+    print(frame.shape)
+    video_reader = torchvision.io.VideoReader(video_path)
+    for i, (frame, pos) in enumerate(zip(video_reader, absolute_positions)):
+        frame = frame['data'] / 255.0  # Normalize the frame
+        frame = frame[:, CROP_TOP:-CROP_TOP]
+
         start_row = int(pos - min_pos)
         end_row = start_row + frame_height
-        panorama[start_row:end_row] += frame
+        panorama[:, start_row:end_row] += frame
         count[start_row:end_row] += 1
 
     # Average overlapping regions
@@ -86,7 +89,7 @@ def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
     panorama -= panorama.min()
     panorama /= panorama.max()
 
-    Image.fromarray(panorama.numpy() * 255).convert("L").save("output.png")
+    Image.fromarray((panorama.permute(1, 2, 0).numpy() * 255).astype('uint8')).save("output.png")
 
     #import IPython; IPython.embed()
 
