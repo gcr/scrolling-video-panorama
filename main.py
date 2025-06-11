@@ -5,72 +5,88 @@ import typer
 from PIL import Image
 from tqdm.auto import tqdm
 
+def phase_correlate_vertical(img1, img2, subsample_horiz=25):
+    """Find vertical offset between two images using phase correlation"""
+    # FFT both images
+    img1 = img1[..., ::subsample_horiz]
+    img2 = img2[..., ::subsample_horiz]
+    F1 = torch.fft.fft2(img1)
+    F2 = torch.fft.fft2(img2)
+
+    # Cross-power spectrum
+    cross_power = F1 * torch.conj(F2)
+    cross_power /= torch.abs(cross_power) + 1e-10
+
+    # Inverse FFT gives correlation surface
+    correlation = torch.fft.ifft2(cross_power).real
+
+    # Find peak location
+    peak_idx = torch.unravel_index(torch.argmax(correlation), correlation.shape)
+    vertical_offset = peak_idx[0].item()
+
+    # Handle wrap-around (negative offsets appear at end)
+    h = img1.shape[0]
+    if vertical_offset > h // 2:
+        vertical_offset -= h
+
+    return vertical_offset
+
 def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
 
     video_reader = torchvision.io.VideoReader(video_path)
-    signatures_by_row = []
-    # px_offsets = []
-    CROP_TOP = 128
+    px_offsets = []
+    frames = []
+    CROP_TOP = 512
+    N_FRAMES = 550
     prev_frame = None
-    for frame in tqdm(video_reader, total=500, ncols=60):
-        # Process each frame (this is just a placeholder)
+
+    for frame in tqdm(video_reader, total=N_FRAMES, ncols=60):
+        # Process each frame
         frame = frame['data'] / 255.0  # Normalize the frame
         frame = frame[:, CROP_TOP:-CROP_TOP]
-        frame = frame.mean(dim=0, keepdim=True)
-        frame = frame - frame.mean(dim=2, keepdim=True)
-        frame /= (0.001 + frame.std(dim=2, keepdim=True))
-        SCALE = 20
-        frame = frame[:, :, ::SCALE] # downsample width
+        frame = frame.mean(dim=0, keepdim=True)  # Convert to grayscale
 
         if prev_frame is None:
             prev_frame = frame
+            px_offsets.append(0)
+        else:
+            # Use phase correlation to find vertical offset
+            offset = phase_correlate_vertical(frame.squeeze(), prev_frame.squeeze())
+            px_offsets.append(-offset)  # Flip sign for downward scrolling
+            prev_frame = frame
 
-        matches = torch.nn.functional.conv2d(
-            frame[None],
-            prev_frame[None],
-            padding=(128, 0),
-        )
-        # import IPython; IPython.embed()
-        signatures_by_row.append(matches.squeeze())
-        prev_frame = frame
-
+        frames.append(frame.squeeze())
 
 
-    #     # Per-row signatures: difference of consecutive pixels
-    #     print(frame.shape)
-    #     raise ValueError()
-    #     signatures = (frame[:-1, 1:] - frame[:-1, :-1] - frame[1:, :-1] + frame[1:,1:]).mean(dim=1)
+    # Convert relative offsets to absolute positions
+    px_offsets = torch.tensor(px_offsets, dtype=torch.float32)
+    absolute_positions = px_offsets.cumsum(dim=0)
 
-    #     # Calculate the closest pixel offset
-    #     if signatures_by_row:
-    #         a = signatures [None,None]
-    #         b = signatures_by_row[-1][None,None]
-    #         print(b.shape)
-    #         b = b.flip(dims=(-1,))
-    #         PADDING = 128
-    #         offset = torch.nn.functional.conv1d(a,b, padding=PADDING)
-    #         print(offset[0,0,120:136])
-    #         offset = PADDING - offset.argmax()
-    #         print(offset)
-    #         px_offsets.append(offset)
-    #     signatures_by_row.append(signatures)
+    # Create panorama canvas
+    min_pos = absolute_positions.min().int()
+    max_pos = absolute_positions.max().int()
+    frame_height = frames[0].shape[0]
+    total_height = max_pos - min_pos + frame_height
+    total_width = frames[0].shape[1]
 
-    # px_offsets = torch.stack(px_offsets)
-    # # relative to absolute
-    # px_offsets = px_offsets.cumsum(dim=0)
-    # total_n_rows = px_offsets.max()
-    # img = torch.zeros((total_n_rows, len(signatures_by_row)), dtype=torch.float32)
-    # for i, (offset, sig) in enumerate(zip(px_offsets, signatures_by_row)):
-    #     # Place the signature in the correct row
-    #     W = min(len(sig), img.shape[0] - offset)
-    #     img[offset:(offset+W), i] = sig[:W]
+    panorama = torch.zeros((total_height, total_width), dtype=torch.float32)
+    count = torch.zeros((total_height, total_width), dtype=torch.float32)
 
+    # Stitch frames into panorama
+    for i, (frame, pos) in enumerate(zip(frames, absolute_positions)):
+        start_row = int(pos - min_pos)
+        end_row = start_row + frame_height
+        panorama[start_row:end_row] += frame
+        count[start_row:end_row] += 1
 
-    img = torch.stack(signatures_by_row)
+    # Average overlapping regions
+    panorama = panorama / (count + 1e-10)
 
-    img -= img.min()
-    img /= img.max()
-    Image.fromarray(img.numpy() * 255).convert("L").save("output.png")
+    # Normalize for display
+    panorama -= panorama.min()
+    panorama /= panorama.max()
+
+    Image.fromarray(panorama.numpy() * 255).convert("L").save("output.png")
 
     #import IPython; IPython.embed()
 
