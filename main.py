@@ -31,18 +31,21 @@ def phase_correlate_vertical(img1, img2, subsample_horiz=25):
 
     return vertical_offset
 
-def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
+def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4"),
+         output_path = Path("output.png"),
+         num_buckets: int = 20,
+         crop_pixels: int = 512):
 
     video_reader = torchvision.io.VideoReader(video_path)
+    meta = video_reader.get_metadata()
+    n_frames = int(meta['video']['fps'][0] * meta['video']['duration'][0])
     px_offsets = []
-    CROP_TOP = 512
-    N_FRAMES = 550
     prev_frame = None
 
-    for frame in tqdm(video_reader, total=N_FRAMES, ncols=60):
+    for frame in tqdm(video_reader, total=n_frames, ncols=60, desc="Matching", leave=False):
         # Process each frame
         frame = frame['data'] / 255.0  # Normalize the frame
-        frame = frame[:, CROP_TOP:-CROP_TOP]
+        frame = frame[:, crop_pixels:-crop_pixels]
         frame = frame.mean(dim=0, keepdim=True)  # Convert to grayscale
 
         if prev_frame is None:
@@ -67,31 +70,29 @@ def main(video_path = Path("./ScreenRecording_06-11-2025 13-53-32_1.MP4")):
     total_height = max_pos - min_pos + frame_height
     total_width = frame.shape[2]
 
-    panorama = torch.zeros((3, total_height, total_width), dtype=torch.float32)
-    count = torch.zeros((total_height, total_width), dtype=torch.float32)
+    panorama = torch.full((num_buckets, 3, total_height, total_width), float('nan'), dtype=torch.float16)
+    print("Panorama size:", panorama.shape)
 
     # Stitch frames into panorama
-    print(frame.shape)
     video_reader = torchvision.io.VideoReader(video_path)
-    for i, (frame, pos) in enumerate(zip(video_reader, absolute_positions)):
+    for frame, pos in zip(tqdm(video_reader, total=n_frames, desc="Compositing", ncols=60, leave=False), absolute_positions):
         frame = frame['data'] / 255.0  # Normalize the frame
-        frame = frame[:, CROP_TOP:-CROP_TOP]
+        frame = frame[:, crop_pixels:-crop_pixels]
 
         start_row = int(pos - min_pos)
         end_row = start_row + frame_height
-        panorama[:, start_row:end_row] += frame
-        count[start_row:end_row] += 1
 
-    # Average overlapping regions
-    panorama = panorama / (count + 1e-10)
+        # Random bucket selection for this frame's pixels
+        bucket_idx = torch.randint(0, num_buckets, (1,)).item()
+        panorama[bucket_idx, :, start_row:end_row] = frame
 
-    # Normalize for display
-    panorama -= panorama.min()
-    panorama /= panorama.max()
+    # Take median across the buckets
+    panorama = torch.nanmedian(panorama, dim=0).values
 
-    Image.fromarray((panorama.permute(1, 2, 0).numpy() * 255).astype('uint8')).save("output.png")
+    panorama = (panorama.permute(1, 2, 0).numpy() * 255).astype('uint8')
 
     #import IPython; IPython.embed()
+    Image.fromarray(panorama).save(output_path)
 
 
 
